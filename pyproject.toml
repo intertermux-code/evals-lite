@@ -1,0 +1,13 @@
+[project]
+name = "evals-lite"
+version = "0.1.0"
+description = "Local-first LLM eval regression runner"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+[project.scripts]
+evals = "evals.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
