@@ -22,11 +22,15 @@ All list/diff/show/cost commands accept `--json` for machine-readable output.
 ```
 EVALS_API_KEY=sk-... evals run nightly --model gpt-4o-mini
 evals run nightly --model gpt-4o --api-key sk-...
+evals run nightly --base-url http://localhost:11434/v1
 ```
 
-Default endpoint is `https://api.openai.com`. `--dry-run` uses the built-in
+Default endpoint is `https://api.openai.com`; `--base-url` points the run at
+another OpenAI-compatible server. `--dry-run` uses the built-in
 mock provider so CI can run the gate without any key or network access;
 pass/fail counts on `--dry-run` are illustrative, not real scores.
+
+Cases run one after another. `--concurrency` is refused above 1.
 
 ## Eval-set format
 

@@ -2,8 +2,9 @@ import os, tempfile, unittest, subprocess, sys
 from evals.scorers import exact, contains, fuzzy, run_scorer
 from evals.yamlparse import parse
 from evals.ledger import Ledger, cost_for
+from evals import cli as evals_cli
 from evals.cli import main, run_one
-from evals.provider import MockProvider
+from evals.provider import MockProvider, Provider
 
 class TestMultipleScorers(unittest.TestCase):
     def test_all_must_pass(self):
@@ -58,6 +59,54 @@ class TestCost(unittest.TestCase):
     def test_math(self):
         self.assertAlmostEqual(cost_for("mock", 1000, 1000), 0.0)
         self.assertIsNone(cost_for("unknown-model", 10, 10))
+
+class TestRunCLIFlags(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.directory)
+        self.addCleanup(os.chdir, self.cwd)
+        main(["init"])
+
+    def _record_provider(self, seen):
+        """A provider that remembers its endpoint and answers without a network."""
+        class Recorder(Provider):
+            def __init__(self, name, base_url, model, api_key=None):
+                seen["base_url"] = base_url
+                super().__init__(name, base_url, model, api_key)
+
+            def chat(self, prompt):
+                return {"output": "hello", "prompt_tokens": 1, "completion_tokens": 1}
+
+        original = evals_cli.Provider
+        evals_cli.Provider = Recorder
+        self.addCleanup(setattr, evals_cli, "Provider", original)
+
+    def test_concurrency_above_one_is_refused(self):
+        rc = main(["run", "smoke", "--dry-run", "--concurrency", "4",
+                   "--db", ".evals/evals.db"])
+        self.assertEqual(rc, 1)
+
+    def test_concurrency_of_one_is_accepted(self):
+        rc = main(["run", "smoke", "--dry-run", "--concurrency", "1",
+                   "--db", ".evals/evals.db"])
+        self.assertEqual(rc, 0)
+
+    def test_base_url_reaches_the_provider(self):
+        seen = {}
+        self._record_provider(seen)
+        rc = main(["run", "smoke", "--base-url", "http://127.0.0.1:11434/v1",
+                   "--db", ".evals/evals.db"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["base_url"], "http://127.0.0.1:11434/v1")
+
+    def test_default_base_url_is_the_openai_endpoint(self):
+        seen = {}
+        self._record_provider(seen)
+        rc = main(["run", "smoke", "--db", ".evals/evals.db"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["base_url"], "https://api.openai.com")
+
 
 class TestDiffCLI(unittest.TestCase):
     def test_e2e(self):

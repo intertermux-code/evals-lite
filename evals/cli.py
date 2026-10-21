@@ -12,6 +12,7 @@ from evals.yamlparse import parse
 
 DEFAULT_EVAL = "evals.yaml"
 DEFAULT_DB = ".evals/evals.db"
+DEFAULT_BASE_URL = "https://api.openai.com"
 
 def load_evals(path):
     with open(path) as f:
@@ -85,9 +86,11 @@ def run_one(case, provider):
     }
 
 def cmd_run(args):
+    if args.concurrency != 1:
+        print("--concurrency is not supported: runs are sequential", file=sys.stderr)
+        return 1
     data = load_evals(args.eval)
-    provider = MockProvider(model=args.model or "mock") if args.dry_run else Provider("default", "https://api.openai.com", args.model or "gpt-4o-mini", api_key=args.api_key)
-    # allow provider config? keep simple
+    provider = MockProvider(model=args.model or "mock") if args.dry_run else Provider("default", args.base_url, args.model or "gpt-4o-mini", api_key=args.api_key)
     cases = data["cases"]
     ledger = Ledger(args.db)
     t0 = time.time()
@@ -211,6 +214,8 @@ def main(argv=None):
     sp.add_argument("--api-key", default=None)
     sp.add_argument("--dry-run", action="store_true")
     sp.add_argument("--model", default=None)
+    sp.add_argument("--base-url", default=DEFAULT_BASE_URL,
+                    help="OpenAI-compatible endpoint (default: %s)" % DEFAULT_BASE_URL)
     sp.add_argument("--concurrency", type=int, default=1)
     sp.set_defaults(func=cmd_run)
     sp = sub.add_parser("list")
