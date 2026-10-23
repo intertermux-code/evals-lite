@@ -1,6 +1,19 @@
 # evals-lite
 
+[![PyPI](https://img.shields.io/pypi/v/evals-lite)](https://pypi.org/project/evals-lite/)
+[![Tests](https://github.com/intertermux-code/evals-lite/actions/workflows/test.yml/badge.svg)](https://github.com/intertermux-code/evals-lite/actions/workflows/test.yml)
+
 Local-first LLM eval regression runner. Stdlib only.
+
+## Install
+
+```bash
+pip install evals-lite
+evals --help
+```
+
+From a source checkout, `python -m evals --help` works without installing (or
+`pip install -e .` for the `evals` command).
 
 ## Quickstart
 
@@ -125,6 +138,37 @@ steps:
 
 The `diff` step fails the build when any case flips pass → fail. The report step is
 optional and pairs well with `actions/upload-artifact`.
+
+## Releasing
+
+Releases are published to PyPI by GitHub Actions using OIDC trusted publishing,
+so no API token is stored anywhere:
+
+1. Bump the version in `pyproject.toml` and `evals/__init__.py`. A test keeps
+   the two in sync.
+2. Tag the release and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   The publish workflow checks the tag against `pyproject.toml` and fails if
+   they differ; otherwise it builds an sdist and a wheel, runs `twine check` on
+   both and uploads them to PyPI. Running the workflow manually does the same
+   thing without a tag.
+3. Optionally create the matching GitHub release for the tag.
+
+Before the first release, a maintainer has to register the `evals-lite` project
+on PyPI and configure a trusted publisher for it: owner/repository
+`intertermux-code/evals-lite`, workflow name `Publish` (filename
+`.github/workflows/publish.yml`), and no environment (the workflow does not
+declare one).
+
+## Testing
+
+```bash
+pip install -e . pytest
+python -m pytest
+```
+
+The suite runs on Python 3.11, 3.12 and 3.13 in CI. Building a release
+locally needs `python -m build` and `twine check dist/*`; the wheel can then be
+installed into a fresh venv and smoke-tested with `evals --help`.
 
 ## Limitations
 

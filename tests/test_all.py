@@ -1,8 +1,9 @@
-import os, tempfile, unittest, subprocess, sys, io, json, contextlib, threading
+import os, re, tempfile, unittest, subprocess, sys, io, json, contextlib, threading
 from evals.scorers import exact, contains, fuzzy, run_scorer
 from evals.yamlparse import parse
 from evals.ledger import Ledger, cost_for
 from evals import cli as evals_cli
+from evals import __version__
 from evals.cli import main, run_one
 from evals.presets import resolve, names
 from evals.provider import MockProvider, Provider
@@ -446,6 +447,22 @@ class TestReportCLI(Sandbox):
         rc, out, err = invoke(["report", "nope", "--db", self.db])
         self.assertEqual(rc, 1)
         self.assertIn("run not found", err)
+
+
+class TestVersion(unittest.TestCase):
+    def test_pyproject_matches_package(self):
+        """The tag guard in publish.yml reads pyproject, so the two must agree."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "pyproject.toml")) as f:
+            declared = re.search(r'^version = "([^"]+)"', f.read(), re.M).group(1)
+        self.assertEqual(declared, __version__)
+
+    def test_cli_version_flag(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as stop:
+            main(["--version"])
+        self.assertEqual(out.getvalue().strip(), __version__)
+        self.assertEqual(stop.exception.code, 0)
 
 
 if __name__ == "__main__":
