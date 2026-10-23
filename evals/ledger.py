@@ -84,3 +84,31 @@ class Ledger:
     def results_for(self, run_id):
         rows = self.conn.execute("SELECT case_id,output,passed,scorer_results,latency_ms,prompt_tokens,completion_tokens,cost_usd FROM results WHERE run_id=?", (run_id,)).fetchall()
         return rows
+
+    def cost_by_model(self):
+        return self.conn.execute(
+            """SELECT r.model,
+                      COUNT(DISTINCT r.id),
+                      COUNT(s.id),
+                      COALESCE(SUM(s.prompt_tokens), 0),
+                      COALESCE(SUM(s.completion_tokens), 0),
+                      SUM(s.cost_usd)
+               FROM runs r LEFT JOIN results s ON s.run_id = r.id
+               GROUP BY r.model
+               ORDER BY COALESCE(SUM(s.cost_usd), 0) DESC, r.model""",
+        ).fetchall()
+
+    def cost_by_run(self):
+        return self.conn.execute(
+            """SELECT r.ref,
+                      r.timestamp,
+                      r.model,
+                      r.total,
+                      r.passed,
+                      COALESCE(SUM(s.prompt_tokens), 0),
+                      COALESCE(SUM(s.completion_tokens), 0),
+                      SUM(s.cost_usd)
+               FROM runs r LEFT JOIN results s ON s.run_id = r.id
+               GROUP BY r.id
+               ORDER BY r.id""",
+        ).fetchall()
