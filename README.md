@@ -20,6 +20,7 @@ From a source checkout, `python -m evals --help` works without installing (or
 ```
 evals init                              # scaffold evals.yaml + .evals/
 evals run smoke --dry-run               # run the eval set (offline, mock provider)
+evals run smoke2 --dry-run              # a second run, to diff against
 evals list                              # past runs
 evals show smoke                         # per-case results of one run
 evals diff smoke smoke2 --fail-on-regression   # CI gate: exit 1 on regression
