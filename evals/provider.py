@@ -3,6 +3,11 @@ import json
 import urllib.request
 import urllib.error
 
+
+class ProviderError(Exception):
+    """A provider request failed; the CLI reports it cleanly instead of tracing back."""
+
+
 class Provider:
     def __init__(self, name, base_url, model, api_key=None):
         self.name = name
@@ -11,14 +16,23 @@ class Provider:
         self.api_key = api_key or os.environ.get("EVALS_API_KEY")
 
     def chat(self, prompt):
-        url = self.base_url + "/v1/chat/completions"
+        base = self.base_url
+        if base.endswith("/v1"):
+            url = base + "/chat/completions"
+        else:
+            url = base + "/v1/chat/completions"
         body = {"model": self.model, "messages": [{"role": "user", "content": prompt}]}
         data = json.dumps(body).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         if self.api_key:
             req.add_header("Authorization", "Bearer " + self.api_key)
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode()
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read().decode()
+        except urllib.error.HTTPError as e:
+            raise ProviderError("%s request failed: HTTP %s %s" % (self.name, e.code, e.reason))
+        except urllib.error.URLError as e:
+            raise ProviderError("%s request failed: %s" % (self.name, e))
         obj = json.loads(raw)
         choice = obj["choices"][0]["message"]["content"]
         usage = obj.get("usage", {}) or {}

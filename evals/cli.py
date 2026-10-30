@@ -6,7 +6,7 @@ import time
 
 from evals import __version__
 from evals.scorers import run_scorer
-from evals.provider import Provider, MockProvider
+from evals.provider import Provider, MockProvider, ProviderError
 from evals.ledger import Ledger, cost_for
 from evals.presets import resolve as resolve_provider
 from evals.report import render_markdown
@@ -102,7 +102,11 @@ def cmd_run(args):
     t0 = time.time()
     results = []
     for c in cases:
-        r = run_one(c, provider)
+        try:
+            r = run_one(c, provider)
+        except ProviderError as e:
+            print(e, file=sys.stderr)
+            return 1
         results.append(r)
     wall = time.time() - t0
     passed = sum(1 for r in results if r["passed"])

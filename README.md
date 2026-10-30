@@ -61,6 +61,9 @@ evals run nightly --base-url http://localhost:11434/v1   # any OpenAI-compatible
 evals run nightly --model gpt-4o --api-key sk-...        # last resort: the key is in your shell history
 ```
 
+A `--base-url` that already ends in `/v1` (with or without a trailing slash) is used as-is;
+the `/v1/chat/completions` path is only appended when the base-url does not already end in `/v1`.
+
 Key lookup order is `--api-key`, then the preset's env var, then
 `EVALS_API_KEY`. An unknown `--provider` exits 1 and lists the known names.
 Providers that do not speak the OpenAI-compatible path (or keys you would

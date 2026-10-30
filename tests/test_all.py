@@ -1,4 +1,5 @@
 import os, re, tempfile, unittest, subprocess, sys, io, json, contextlib, threading
+from unittest import mock
 from evals.scorers import exact, contains, fuzzy, run_scorer
 from evals.yamlparse import parse
 from evals.ledger import Ledger, cost_for
@@ -463,6 +464,92 @@ class TestVersion(unittest.TestCase):
             main(["--version"])
         self.assertEqual(out.getvalue().strip(), __version__)
         self.assertEqual(stop.exception.code, 0)
+
+
+class FakeUrlopen:
+    """Captures the request URL and returns a canned 200 chat-completions response."""
+
+    def __init__(self):
+        self.url = None
+
+    def __call__(self, req, timeout=60):
+        self.url = req.full_url
+
+        class Response:
+            def read(self):
+                return b'{"choices": [{"message": {"content": "ok"}}], "usage": {}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return Response()
+
+
+class TestBaseUrlNormalization(unittest.TestCase):
+    def _requested_url(self, base_url):
+        catcher = FakeUrlopen()
+        with mock.patch("urllib.request.urlopen", side_effect=catcher):
+            Provider("openai", base_url, "gpt-4o", api_key="x").chat("hello")
+        return catcher.url
+
+    def test_base_url_ending_in_v1_is_used_as_is(self):
+        self.assertEqual(self._requested_url("https://api.example.com/v1"),
+                         "https://api.example.com/v1/chat/completions")
+
+    def test_base_url_ending_in_v1_with_trailing_slash_is_used_as_is(self):
+        self.assertEqual(self._requested_url("https://api.example.com/v1/"),
+                         "https://api.example.com/v1/chat/completions")
+
+    def test_base_url_without_v1_keeps_existing_behaviour(self):
+        self.assertEqual(self._requested_url("https://api.example.com"),
+                         "https://api.example.com/v1/chat/completions")
+
+    def test_trailing_slash_without_v1_is_stripped_then_appended(self):
+        self.assertEqual(self._requested_url("https://api.example.com/"),
+                         "https://api.example.com/v1/chat/completions")
+
+
+class TestRequestFailure(Sandbox):
+    def _stub_404_server(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return server
+
+    def test_404_exits_cleanly_without_traceback(self):
+        server = self._stub_404_server()
+        rc, out, err = invoke(["run", "smoke",
+                               "--base-url", "http://127.0.0.1:%d" % server.server_address[1],
+                               "--db", self.db])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("failed", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("HTTPError", err)
+
+    def test_connection_refused_exits_cleanly_without_traceback(self):
+        rc, out, err = invoke(["run", "smoke", "--base-url", "http://127.0.0.1:1", "--db", self.db])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("failed", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("URLError", err)
 
 
 if __name__ == "__main__":
