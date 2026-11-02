@@ -239,30 +239,44 @@ def cmd_report(args):
         print(text)
     return 0
 
+def _occurrences(rows):
+    # keyed lists keep insertion order; a duplicated id must not lose results
+    groups = {}
+    for r in rows:
+        groups.setdefault(r[0], []).append(r)
+    return groups
+
+def _occurrence_label(cid, n, count):
+    return f"{cid}#{n}" if count > 1 else cid
+
 def cmd_diff(args):
     ledger = Ledger(args.db)
     a = ledger.run_by_ref(args.ref1)
     b = ledger.run_by_ref(args.ref2)
     if not a or not b:
         print("run not found", file=sys.stderr); ledger.close(); return 1
-    ra = {r[0]: r for r in ledger.results_for(a[0])}
-    rb = {r[0]: r for r in ledger.results_for(b[0])}
+    ga = _occurrences(ledger.results_for(a[0]))
+    gb = _occurrences(ledger.results_for(b[0]))
     ledger.close()
     regressions = []
     fixed = []
     new = []
     removed = []
-    for cid in sorted(set(ra) | set(rb)):
-        if cid in ra and cid in rb:
-            pa = bool(ra[cid][2]); pb = bool(rb[cid][2])
+    for cid in sorted(set(ga) | set(gb)):
+        na, nb = ga.get(cid, []), gb.get(cid, [])
+        shared = min(len(na), len(nb))
+        count = max(len(na), len(nb))
+        for i in range(shared):
+            label = _occurrence_label(cid, i + 1, count)
+            pa = bool(na[i][2]); pb = bool(nb[i][2])
             if pa and not pb:
-                regressions.append(cid)
+                regressions.append(label)
             elif (not pa) and pb:
-                fixed.append(cid)
-        elif cid in rb and cid not in ra:
-            new.append(cid)
-        elif cid in ra and cid not in rb:
-            removed.append(cid)
+                fixed.append(label)
+        for i in range(shared, len(nb)):
+            new.append(_occurrence_label(cid, i + 1, count))
+        for i in range(shared, len(na)):
+            removed.append(_occurrence_label(cid, i + 1, count))
     if args.json:
         print(json.dumps({"regressions": regressions, "fixed": fixed, "new": new, "removed": removed}, indent=2))
     else:

@@ -152,6 +152,65 @@ class TestDiffCLI(unittest.TestCase):
         rc = main(["diff", "smoke", "smoke3", "--db", ".evals/evals.db"])
         self.assertEqual(rc, 0)
 
+class TestDiffDuplicateIds(Sandbox):
+    def _case(self, cid, expected):
+        return '  - id: %s\n    input: "say hi"\n    expected: "%s"\n    scorer: contains\n' % (cid, expected)
+
+    def _write_eval(self, lines):
+        with open("evals.yaml", "w") as f:
+            f.write("cases:\n" + "".join(lines))
+
+    def test_duplicated_id_regression_is_not_swallowed(self):
+        # both occurrences pass in r1; in r2 the FIRST occurrence fails while
+        # the last one passes -- keyed-by-id diffs used to see pass->pass
+        self._write_eval([self._case("dup", "mock"), self._case("dup", "mock")])
+        rc, out, _ = invoke(["run", "r1", "--dry-run", "--eval", "evals.yaml", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("2/2 passed", out)
+        self._write_eval([self._case("dup", "zzz"), self._case("dup", "mock")])
+        rc, out, _ = invoke(["run", "r2", "--dry-run", "--eval", "evals.yaml", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("1/2 passed", out)
+        rc, out, _ = invoke(["diff", "r1", "r2", "--fail-on-regression", "--db", self.db])
+        self.assertEqual(rc, 1)
+        self.assertIn("REGRESSION: dup#1", out)
+        self.assertIn("regressions=1", out)
+
+    def test_occurrences_pair_in_order_and_extras_are_listed(self):
+        self._write_eval([self._case("dup", "zzz"), self._case("dup", "mock"),
+                          self._case("solo", "mock")])
+        invoke(["run", "r1", "--dry-run", "--eval", "evals.yaml", "--db", self.db])
+        self._write_eval([self._case("dup", "zzz"), self._case("dup", "zzz"),
+                          self._case("dup", "mock")])
+        invoke(["run", "r2", "--dry-run", "--eval", "evals.yaml", "--db", self.db])
+        rc, out, _ = invoke(["diff", "r1", "r2", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("REGRESSION: dup#2", out)
+        self.assertNotIn("REGRESSION: dup#1", out)
+        self.assertIn("NEW: dup#3", out)
+        self.assertIn("REMOVED: solo", out)
+        self.assertIn("regressions=1 fixed=0 new=1 removed=1", out)
+        rc, out, _ = invoke(["diff", "r1", "r2", "--json", "--db", self.db])
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertEqual(doc["regressions"], ["dup#2"])
+        self.assertEqual(doc["new"], ["dup#3"])
+        self.assertEqual(doc["removed"], ["solo"])
+
+    def test_unique_ids_keep_the_plain_labels(self):
+        rc, _, _ = invoke(["run", "r1", "--dry-run", "--eval", "evals.yaml", "--db", self.db])
+        self.assertEqual(rc, 0)
+        with open("evals.yaml") as f:
+            text = f.read()
+        with open("evals.yaml", "w") as f:
+            f.write(text.replace('expected: "hello"', 'expected: "zzznomatch"'))
+        invoke(["run", "r2", "--dry-run", "--eval", "evals.yaml", "--db", self.db])
+        rc, out, _ = invoke(["diff", "r1", "r2", "--fail-on-regression", "--db", self.db])
+        self.assertEqual(rc, 1)
+        self.assertIn("REGRESSION: greeting\n", out)
+        self.assertNotIn("#", out)
+
+
 class TestProviderPresets(unittest.TestCase):
     def test_defaults_come_from_the_openai_preset(self):
         cfg = resolve(env={})
