@@ -94,6 +94,18 @@ class TestLedger(unittest.TestCase):
         self.assertEqual(rows[0][0], "c1")
         L.close()
 
+    def test_result_counts(self):
+        d = tempfile.mkdtemp()
+        db = os.path.join(d, "t.db")
+        L = Ledger(db)
+        r1 = L.create_run("full", "mock", "mock", 2, 2, 0, 1.0, 0.0)
+        L.add_result(r1, "c1", "out", True, {"exact": True}, 5.0, 10, 5, 0.0)
+        L.add_result(r1, "c2", "out", True, {"exact": True}, 5.0, 10, 5, 0.0)
+        r2 = L.create_run("cut", "mock", "mock", 3, 1, 0, 1.0, 0.0)
+        L.add_result(r2, "c1", "out", True, {"exact": True}, 5.0, 10, 5, 0.0)
+        self.assertEqual(L.result_counts(), {r1: 2, r2: 1})
+        L.close()
+
 class TestCost(unittest.TestCase):
     def test_math(self):
         self.assertAlmostEqual(cost_for("mock", 1000, 1000), 0.0)
@@ -609,6 +621,152 @@ class TestRequestFailure(Sandbox):
         self.assertIn("failed", err.lower())
         self.assertNotIn("Traceback", err)
         self.assertNotIn("URLError", err)
+
+
+class StubChatServer:
+    """Local OpenAI-compatible endpoint that goes bad partway through a run.
+
+    `state["fail_after"]` is the number of requests still answered with 200;
+    every request after that gets a 500, which the provider turns into a
+    ProviderError.
+    """
+
+    def __init__(self, fail_after=10 ** 6):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        state = {"hits": 0, "fail_after": fail_after}
+        self.state = state
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                state["hits"] += 1
+                if state["hits"] <= state["fail_after"]:
+                    payload = json.dumps({
+                        "choices": [{"message": {"content": "hello"}}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                    }).encode()
+                    self.send_response(200)
+                else:
+                    payload = b'{"error": {"message": "upstream exploded"}}'
+                    self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def base_url(self):
+        return "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def shutdown(self):
+        self.server.shutdown()
+
+FOUR_CASES = "cases:\n" + "".join(
+    '  - id: %s\n    input: "say hi"\n    expected: "hello"\n    scorer: contains\n' % cid
+    for cid in ("one", "two", "three", "four"))
+
+class TestPartialRun(Sandbox):
+    """A provider error halfway through a long run must not lose the earlier cases."""
+
+    def setUp(self):
+        super().setUp()
+        with open("evals.yaml", "w") as f:
+            f.write(FOUR_CASES)
+        self.stub = StubChatServer()
+        self.addCleanup(self.stub.shutdown)
+
+    def _run(self, ref, fail_after=2):
+        # fail_after counts the requests of this run, not of the server's life
+        self.stub.state.update(hits=0, fail_after=fail_after)
+        return invoke(["run", ref, "--base-url", self.stub.base_url, "--db", self.db])
+
+    def _ledger_row(self, ref):
+        ledger = Ledger(self.db)
+        row = ledger.run_by_ref(ref)
+        results = ledger.results_for(row[0]) if row else []
+        ledger.close()
+        return row, results
+
+    def test_results_before_the_error_stay_recoverable(self):
+        rc, out, err = self._run("midrun")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("failed", err.lower())
+        self.assertNotIn("Traceback", err)
+        row, results = self._ledger_row("midrun")
+        self.assertEqual(row[5], 4)  # the planned total, not the recorded one
+        self.assertEqual(row[6], 2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual([r[0] for r in results], ["one", "two"])
+        self.assertTrue(all(r[2] for r in results))
+
+    def test_aborted_run_is_flagged_incomplete(self):
+        self._run("midrun")
+        rc, out, _ = invoke(["list", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("2/4", out)
+        self.assertIn("incomplete", out)
+        rc, out, _ = invoke(["show", "midrun", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("incomplete: 2 of 4 cases recorded", out)
+        self.assertIn("one: PASS", out)
+        self.assertIn("two: PASS", out)
+        self.assertNotIn("three", out)
+        rc, out, _ = invoke(["report", "midrun", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("| Status | incomplete: 2 of 4 cases recorded |", out)
+
+    def test_json_list_flags_the_partial_run_only(self):
+        self._run("midrun")
+        self._run("complete", fail_after=10 ** 6)
+        rc, out, _ = invoke(["list", "--json", "--db", self.db])
+        self.assertEqual(rc, 0)
+        rows = json.loads(out)
+        self.assertEqual([r["ref"] for r in rows], ["midrun", "complete"])
+        self.assertTrue(rows[0]["partial"])
+        self.assertNotIn("partial", rows[1])
+
+    def test_diff_of_a_partial_run_reports_the_missing_cases(self):
+        self._run("full", fail_after=10 ** 6)
+        self._run("cut")
+        rc, out, _ = invoke(["diff", "full", "cut", "--fail-on-regression", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertIn("REMOVED: three", out)
+        self.assertIn("REMOVED: four", out)
+        self.assertNotIn("REGRESSION", out)
+
+    def test_failure_on_the_first_case_records_nothing(self):
+        rc, out, err = self._run("midrun", fail_after=0)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertNotIn("partial run", err)
+        row, results = self._ledger_row("midrun")
+        self.assertIsNone(row)
+        self.assertEqual(results, [])
+
+    def test_successful_runs_keep_their_shape(self):
+        rc, out, _ = self._run("clean", fail_after=10 ** 6)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "run clean: 4/4 passed\n")
+        row, results = self._ledger_row("clean")
+        self.assertEqual((row[5], row[6], row[7]), (4, 4, 0))
+        self.assertEqual(len(results), 4)
+        rc, list_out, _ = invoke(["list", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("incomplete", list_out)
+        rc, show_out, _ = invoke(["show", "clean", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("incomplete", show_out)
+        rc, report_out, _ = invoke(["report", "clean", "--db", self.db])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("incomplete", report_out)
 
 
 if __name__ == "__main__":

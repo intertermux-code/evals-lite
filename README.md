@@ -75,6 +75,23 @@ real scores.
 
 Cases run one after another. `--concurrency` is refused above 1.
 
+## Interrupted runs
+
+A provider error stops the run where it stands: exit 1, the provider failure on
+stderr, nothing on stdout. The cases that already answered are recorded before
+the run gives up, against the planned case count, so a long run is never lost to
+one bad response:
+
+```
+evals list                       # marks the aborted run `incomplete`
+evals show nightly               # "incomplete: 2 of 4 cases recorded ..."
+evals diff last_good nightly     # cases that never ran show up as REMOVED
+evals report nightly             # the Markdown header carries the same line
+```
+
+`list --json` adds `"partial": true` for such a run only. A run that fails on
+its very first case has no results to keep, so nothing is recorded.
+
 ## Eval-set format
 
 `evals.yaml`:

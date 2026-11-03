@@ -101,12 +101,13 @@ def cmd_run(args):
     ledger = Ledger(args.db)
     t0 = time.time()
     results = []
+    stopped = None
     for c in cases:
         try:
             r = run_one(c, provider)
         except ProviderError as e:
-            print(e, file=sys.stderr)
-            return 1
+            stopped = e
+            break
         results.append(r)
     wall = time.time() - t0
     passed = sum(1 for r in results if r["passed"])
@@ -116,24 +117,38 @@ def cmd_run(args):
     if costs:
         total_cost = sum(costs)
     ref = args.ref or time.strftime("%Y%m%dT%H%M%S")
-    run_id = ledger.create_run(ref, provider.name, provider.model, len(results), passed, failed, wall, total_cost)
-    for r in results:
-        ledger.add_result(run_id, r["case_id"], r["output"], r["passed"], r["scorer_results"], r["latency_ms"], r["prompt_tokens"], r["completion_tokens"], r["cost_usd"])
+    if stopped is None or results:
+        # An aborted run records the planned case count as its total, so the
+        # ledger row has fewer results than it promises and reads as incomplete.
+        total = len(results) if stopped is None else len(cases)
+        run_id = ledger.create_run(ref, provider.name, provider.model, total, passed, failed, wall, total_cost)
+        for r in results:
+            ledger.add_result(run_id, r["case_id"], r["output"], r["passed"], r["scorer_results"], r["latency_ms"], r["prompt_tokens"], r["completion_tokens"], r["cost_usd"])
     ledger.close()
+    if stopped is not None:
+        print(stopped, file=sys.stderr)
+        if results:
+            print(f"partial run {ref}: {len(results)} of {len(cases)} cases recorded", file=sys.stderr)
+        return 1
     print(f"run {ref}: {passed}/{len(results)} passed")
     return 0
 
 def cmd_list(args):
     ledger = Ledger(args.db)
     rows = ledger.runs()
+    counts = ledger.result_counts()
     ledger.close()
     if args.json:
         out = [{"ref": r[1], "timestamp": r[2], "passed": r[6], "total": r[5], "model": r[4]} for r in rows]
+        for item, r in zip(out, rows):
+            if counts.get(r[0], 0) < r[5]:
+                item["partial"] = True
         print(json.dumps(out, indent=2))
         return 0
     print(f"{'ref':<20} {'timestamp':<22} {'pass/total':<12} {'model'}")
     for r in rows:
-        print(f"{r[1]:<20} {r[2]:<22} {r[6]}/{r[5]:<10} {r[4]}")
+        partial = "  incomplete" if counts.get(r[0], 0) < r[5] else ""
+        print(f"{r[1]:<20} {r[2]:<22} {r[6]}/{r[5]:<10} {r[4]}{partial}")
     return 0
 
 def cmd_show(args):
@@ -148,6 +163,8 @@ def cmd_show(args):
         print(json.dumps(out, indent=2))
         return 0
     print(f"ref={args.ref} model={run[4]}")
+    if len(rows) < run[5]:
+        print(f"incomplete: {len(rows)} of {run[5]} cases recorded before the run stopped")
     for r in rows:
         print(f"{r[0]}: {'PASS' if r[2] else 'FAIL'}  latency={r[4]:.0f}ms")
         print(f"  output: {r[1]}")

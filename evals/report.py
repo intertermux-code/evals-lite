@@ -36,12 +36,16 @@ def render_markdown(run, rows):
     ct = sum(r[6] or 0 for r in rows)
 
     out = ["# Eval run `%s`" % ref, ""]
-    out += [
+    meta = [
         "| | |",
         "| --- | --- |",
         "| Timestamp | %s |" % timestamp,
         "| Provider | %s |" % provider,
         "| Model | %s |" % model,
+    ]
+    if len(rows) < total:
+        meta.append("| Status | incomplete: %d of %d cases recorded |" % (len(rows), total))
+    meta += [
         "| Passed | %d/%d (%s) |" % (passed, total, "n/a" if not total else "%.1f%%" % (100.0 * passed / total)),
         "| Failed | %d |" % failed,
         "| Wall time | %.3fs |" % wall,
@@ -52,6 +56,7 @@ def render_markdown(run, rows):
         "| Case | Status | Scorers | Output | Latency | Tokens | Cost |",
         "| --- | --- | --- | --- | ---: | ---: | ---: |",
     ]
+    out += meta
     for r in rows:
         scorers = json.loads(r[3] or "{}")
         detail = ", ".join("%s %s" % (k, "pass" if v else "fail") for k, v in sorted(scorers.items()))

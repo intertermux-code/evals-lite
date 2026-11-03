@@ -85,6 +85,10 @@ class Ledger:
         rows = self.conn.execute("SELECT case_id,output,passed,scorer_results,latency_ms,prompt_tokens,completion_tokens,cost_usd FROM results WHERE run_id=?", (run_id,)).fetchall()
         return rows
 
+    def result_counts(self):
+        """Recorded results per run id; a run below its total was cut short."""
+        return dict(self.conn.execute("SELECT run_id,COUNT(id) FROM results GROUP BY run_id").fetchall())
+
     def cost_by_model(self):
         return self.conn.execute(
             """SELECT r.model,
