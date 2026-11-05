@@ -1,11 +1,12 @@
 import os, re, tempfile, unittest, subprocess, sys, io, json, contextlib, threading
 from unittest import mock
 from evals.scorers import exact, contains, fuzzy, run_scorer
+from evals.scorers import resolve as resolve_scorer, names as scorer_names
 from evals.yamlparse import parse
 from evals.ledger import Ledger, cost_for
 from evals import cli as evals_cli
 from evals import __version__
-from evals.cli import main, run_one
+from evals.cli import main, run_one, load_evals, ConfigError
 from evals.presets import resolve, names
 from evals.provider import MockProvider, Provider
 from evals.report import render_markdown
@@ -767,6 +768,234 @@ class TestPartialRun(Sandbox):
         rc, report_out, _ = invoke(["report", "clean", "--db", self.db])
         self.assertEqual(rc, 0)
         self.assertNotIn("incomplete", report_out)
+
+
+class TestScorerNameMatching(unittest.TestCase):
+    """Scorer names are matched case-insensitively; anything else is a config error."""
+
+    def test_every_spelling_resolves_to_one_scorer(self):
+        for spelling in ("exact", "Exact", "EXACT", "eXaCt"):
+            self.assertEqual(resolve_scorer(spelling), "exact")
+        self.assertEqual(resolve_scorer("Contains"), "contains")
+        self.assertEqual(resolve_scorer("FUZZY"), "fuzzy")
+
+    def test_mis_cased_names_score_like_the_canonical_one(self):
+        for spelling in ("Exact", "EXACT"):
+            self.assertTrue(run_scorer(spelling, "Hello   World", "hello world"))
+            self.assertFalse(run_scorer(spelling, "hello", "world"))
+        self.assertTrue(run_scorer("CONTAINS", "abc def", "BC D"))
+        self.assertTrue(run_scorer("Fuzzy", "a b c d e f", "a b c d e f g h i j", threshold=0.6))
+
+    def test_canonical_names_keep_their_own_semantics(self):
+        # widening name matching must not have changed what a scorer computes
+        samples = [("Hello  World", "hello world"), ("abc", "xyz"), ("mock response: hi", "hi")]
+        for name, fn in (("exact", exact), ("contains", contains), ("fuzzy", fuzzy)):
+            for output, expected in samples:
+                self.assertEqual(run_scorer(name, output, expected), bool(fn(output, expected)))
+
+    def test_unknown_name_still_raises_and_lists_the_valid_ones(self):
+        for spelling in ("nope", "Nope", "Regex", "e x a c t"):
+            with self.assertRaises(ValueError) as ctx:
+                run_scorer(spelling, "a", "a")
+            self.assertIn(spelling, str(ctx.exception))
+            for name in scorer_names():
+                self.assertIn(name, str(ctx.exception))
+
+    def test_a_name_that_is_not_a_string_is_unknown(self):
+        with self.assertRaises(ValueError):
+            run_scorer(3, "a", "a")
+
+TYPO_EVAL = (
+    "cases:\n"
+    '  - id: greeting\n    input: "Say hello in one word."\n'
+    '    expected: "hello"\n    scorer: contains\n'
+    '  - id: math\n    input: "What is 2+2?"\n'
+    '    expected: "4"\n    scorer: regex\n'
+)
+
+MIS_CASED_EVAL = (
+    "cases:\n"
+    '  - id: greeting\n    input: "Say hello in one word."\n'
+    '    expected: "mock response: Say hello in one word."\n    scorer: Exact\n'
+)
+
+MIXED_SCORERS_EVAL = (
+    "cases:\n"
+    '  - id: both\n    input: "hi"\n    expected: "mock"\n'
+    "    scorers:\n      - Contains\n      - FUZZY\n"
+)
+
+class TestScorerConfigError(Sandbox):
+    """A wrong scorer name is a config error: reported, exit 2, never a recorded False."""
+
+    def _eval(self, text):
+        with open("evals.yaml", "w") as f:
+            f.write(text)
+
+    def _recorded(self, ref):
+        ledger = Ledger(self.db)
+        row = ledger.run_by_ref(ref)
+        results = ledger.results_for(row[0]) if row else []
+        ledger.close()
+        return row, results
+
+    def test_unknown_scorer_is_reported_and_exits_2(self):
+        self._eval(TYPO_EVAL)
+        rc, out, err = invoke(["run", "typo", "--dry-run", "--db", self.db])
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", err)
+        self.assertIn("math", err)
+        self.assertIn("regex", err)
+        for name in scorer_names():
+            self.assertIn(name, err)
+
+    def test_no_result_is_recorded_for_a_bad_scorer_name(self):
+        self._eval(TYPO_EVAL)
+        self.assertEqual(invoke(["run", "typo", "--dry-run", "--db", self.db])[0], 2)
+        row, results = self._recorded("typo")
+        self.assertIsNone(row)
+        self.assertEqual(results, [])
+
+    def test_the_typo_is_caught_before_the_provider_is_asked(self):
+        self._eval(TYPO_EVAL)
+        asked = []
+
+        class Counting(Provider):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def chat(self, prompt):
+                asked.append(prompt)
+                return {"output": "hello", "prompt_tokens": 1, "completion_tokens": 1}
+
+        original = evals_cli.Provider
+        evals_cli.Provider = Counting
+        self.addCleanup(lambda: setattr(evals_cli, "Provider", original))
+        rc, out, err = invoke(["run", "typo", "--db", self.db])
+        self.assertEqual(rc, 2)
+        self.assertEqual(asked, [])
+
+    def test_run_one_refuses_an_unknown_name_instead_of_failing_the_case(self):
+        case = {"id": "c1", "input": "hi", "expected": "mock", "scorer": "regex"}
+        with self.assertRaises(ConfigError):
+            run_one(case, MockProvider())
+
+    def test_mis_cased_scorer_is_scored_and_recorded(self):
+        self._eval(MIS_CASED_EVAL)
+        rc, out, err = invoke(["run", "cased", "--dry-run", "--db", self.db])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "run cased: 1/1 passed\n")
+        row, results = self._recorded("cased")
+        self.assertTrue(results[0][2])
+        self.assertEqual(json.loads(results[0][3]), {"exact": True})
+
+    def test_mis_cased_names_in_a_scorers_list_are_scored(self):
+        self._eval(MIXED_SCORERS_EVAL)
+        rc, out, err = invoke(["run", "mix", "--dry-run", "--db", self.db])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "run mix: 1/1 passed\n")
+        row, results = self._recorded("mix")
+        self.assertEqual(json.loads(results[0][3]), {"contains": True, "fuzzy": True})
+
+    def test_the_init_sample_still_runs_as_it_did(self):
+        rc, out, err = invoke(["run", "smoke", "--dry-run", "--db", self.db])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "run smoke: 1/2 passed\n")
+        row, results = self._recorded("smoke")
+        self.assertEqual((row[5], row[6], row[7]), (2, 1, 1))
+        self.assertEqual([json.loads(r[3]) for r in results],
+                         [{"contains": True}, {"exact": False}])
+
+BAD_EVAL_FILES = [
+    ("top level is a list", "- id: c1\n  input: hi\n", "must contain 'cases'"),
+    ("cases is not a list", "cases: 3\n", "'cases' must be a list"),
+    ("no cases key", "name: smoke\n", "must contain 'cases'"),
+    ("a case is not a mapping", "cases:\n  - hello\n", "case 1 must be a mapping"),
+    ("a case has no input", "cases:\n  - id: c1\n", "case 1 needs 'input'"),
+    ("a case has neither key", "cases:\n  - expected: hi\n", "needs 'id' and 'input'"),
+]
+
+class TestEvalFileErrors(Sandbox):
+    """Ordinary eval-file mistakes are reported with the file named, never traced back."""
+
+    def _write(self, path, content):
+        with open(path, "w") as f:
+            f.write(content)
+
+    def _assert_clean_error(self, rc, out, err, path, needle):
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", err)
+        self.assertIn(path, err)
+        self.assertIn(needle, err)
+
+    def test_each_mistake_class_is_reported_and_exits_2(self):
+        for index, (label, content, needle) in enumerate(BAD_EVAL_FILES):
+            path = "bad_%d.yaml" % index
+            self._write(path, content)
+            with self.subTest(label):
+                rc, out, err = invoke(["run", "bad%d" % index, "--eval", path,
+                                       "--dry-run", "--db", self.db])
+                self._assert_clean_error(rc, out, err, path, needle)
+
+    def test_a_missing_file_is_reported_and_exits_2(self):
+        rc, out, err = invoke(["run", "gone", "--eval", "absent.yaml",
+                               "--dry-run", "--db", self.db])
+        self._assert_clean_error(rc, out, err, "absent.yaml", "No such file")
+
+    def test_a_directory_is_reported_and_exits_2(self):
+        os.makedirs("adir")
+        rc, out, err = invoke(["run", "adir", "--eval", "adir",
+                               "--dry-run", "--db", self.db])
+        self.assertEqual(rc, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("adir", err)
+
+    def test_a_file_that_breaks_the_parser_is_reported_and_exits_2(self):
+        # the mini parser gives up on runaway nesting; that is a mistake to report
+        path = "deep.yaml"
+        self._write(path, "a:\n" + "".join(" " * (2 * (i + 1)) + "k%d:\n" % i
+                                           for i in range(4000)))
+        rc, out, err = invoke(["run", "deep", "--eval", path, "--dry-run", "--db", self.db])
+        self._assert_clean_error(rc, out, err, path, "malformed YAML")
+
+    def test_no_run_is_recorded_for_a_misshapen_file(self):
+        self._write("bad.yaml", "cases: 3\n")
+        invoke(["run", "bad", "--eval", "bad.yaml", "--dry-run", "--db", self.db])
+        ledger = Ledger(self.db)
+        self.assertIsNone(ledger.run_by_ref("bad"))
+        ledger.close()
+
+    def test_the_default_eval_path_still_works(self):
+        rc, out, err = invoke(["run", "smoke", "--dry-run", "--db", self.db])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "run smoke: 1/2 passed\n")
+
+class TestLoadEvals(unittest.TestCase):
+    def test_a_misshapen_file_raises_a_config_error_naming_the_file(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "evals.yaml")
+        with open(path, "w") as f:
+            f.write("cases:\n  - id: c1\n")
+        with self.assertRaises(ConfigError) as ctx:
+            load_evals(path)
+        self.assertIn(path, str(ctx.exception))
+
+    def test_a_config_error_is_still_a_value_error(self):
+        # callers that caught ValueError before keep catching the same mistakes
+        path = os.path.join(tempfile.mkdtemp(), "absent.yaml")
+        with self.assertRaises(ValueError):
+            load_evals(path)
+
+    def test_a_valid_file_loads_unchanged(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "evals.yaml")
+        with open(path, "w") as f:
+            f.write(FOUR_CASES)
+        data = load_evals(path)
+        self.assertEqual([c["id"] for c in data["cases"]], ["one", "two", "three", "four"])
+        self.assertEqual([c["scorer"] for c in data["cases"]], ["contains"] * 4)
 
 
 if __name__ == "__main__":

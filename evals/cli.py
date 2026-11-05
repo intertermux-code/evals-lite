@@ -5,7 +5,7 @@ import sys
 import time
 
 from evals import __version__
-from evals.scorers import run_scorer
+from evals.scorers import run_scorer, resolve as resolve_scorer, names as scorer_names
 from evals.provider import Provider, MockProvider, ProviderError
 from evals.ledger import Ledger, cost_for
 from evals.presets import resolve as resolve_provider
@@ -15,17 +15,31 @@ from evals.yamlparse import parse
 DEFAULT_EVAL = "evals.yaml"
 DEFAULT_DB = ".evals/evals.db"
 
+class ConfigError(ValueError):
+    """An eval set or scorer name the user can fix; reported, never traced back."""
+
 def load_evals(path):
-    with open(path) as f:
-        data = parse(f.read())
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        raise ConfigError("%s: %s" % (path, e.strerror or e))
+    try:
+        data = parse(text)
+    except Exception as e:
+        raise ConfigError("%s: malformed YAML (%s)" % (path, e))
     if not isinstance(data, dict) or "cases" not in data:
-        raise ValueError("eval file must contain 'cases' list")
+        raise ConfigError("%s: eval file must contain 'cases' list" % path)
     cases = data["cases"]
     if not isinstance(cases, list):
-        raise ValueError("'cases' must be a list")
-    for c in cases:
-        if not isinstance(c, dict) or "id" not in c or "input" not in c:
-            raise ValueError("each case needs 'id' and 'input'")
+        raise ConfigError("%s: 'cases' must be a list" % path)
+    for n, c in enumerate(cases, 1):
+        if not isinstance(c, dict):
+            raise ConfigError("%s: case %d must be a mapping" % (path, n))
+        missing = [k for k in ("id", "input") if k not in c]
+        if missing:
+            raise ConfigError("%s: case %d needs %s" % (
+                path, n, " and ".join("'%s'" % k for k in missing)))
     return data
 
 def cmd_init(args):
@@ -55,13 +69,30 @@ cases:
     print("initialized")
     return 0
 
-def run_one(case, provider):
+def scorer_list(case):
+    """The scorer entries a case asks for, exactly as written in the eval set."""
     scorers = case.get("scorers")
     if scorers is None:
         s = case.get("scorer", "exact")
         scorers = [s] if isinstance(s, str) else (s or ["exact"])
     if not isinstance(scorers, list):
         scorers = [scorers]
+    return scorers
+
+def resolve_scorers(case):
+    """Canonical scorer names for one case. A name that matches nothing is a
+    config error, so it cannot be mistaken for a model that failed."""
+    resolved = []
+    for sc in scorer_list(case):
+        try:
+            resolved.append(resolve_scorer(sc))
+        except ValueError:
+            raise ConfigError("case '%s': unknown scorer '%s' (valid scorers: %s)" % (
+                case.get("id", "?"), sc, ", ".join(scorer_names())))
+    return resolved
+
+def run_one(case, provider):
+    scorers = resolve_scorers(case)
     expected = case.get("expected", "")
     t0 = time.time()
     res = provider.chat(case["input"])
@@ -90,14 +121,22 @@ def cmd_run(args):
     if args.concurrency != 1:
         print("--concurrency is not supported: runs are sequential", file=sys.stderr)
         return 1
-    data = load_evals(args.eval)
+    try:
+        data = load_evals(args.eval)
+        cases = data["cases"]
+        # Check every scorer name before the first request: a typo in the eval
+        # set should neither spend tokens nor land in the ledger as a failure.
+        for c in cases:
+            resolve_scorers(c)
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
     try:
         cfg = resolve_provider(args.provider, args.base_url, args.model, args.api_key)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
     provider = MockProvider(model=args.model or "mock") if args.dry_run else Provider(cfg.name, cfg.base_url, cfg.model, api_key=cfg.api_key)
-    cases = data["cases"]
     ledger = Ledger(args.db)
     t0 = time.time()
     results = []

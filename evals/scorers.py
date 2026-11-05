@@ -23,7 +23,16 @@ SCORERS = {
     "fuzzy": fuzzy,
 }
 
+def names():
+    return sorted(SCORERS)
+
+def resolve(name):
+    """Canonical scorer key. Names are matched case-insensitively, so a
+    capitalized config entry means the same scorer as the lowercase one."""
+    key = name.lower() if isinstance(name, str) else name
+    if key not in SCORERS:
+        raise ValueError("unknown scorer '%s' (valid scorers: %s)" % (name, ", ".join(names())))
+    return key
+
 def run_scorer(name, output, expected, **kw):
-    if name not in SCORERS:
-        raise ValueError(f"unknown scorer: {name}")
-    return bool(SCORERS[name](output, expected, **kw))
+    return bool(SCORERS[resolve(name)](output, expected, **kw))

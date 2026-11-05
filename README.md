@@ -92,6 +92,22 @@ evals report nightly             # the Markdown header carries the same line
 `list --json` adds `"partial": true` for such a run only. A run that fails on
 its very first case has no results to keep, so nothing is recorded.
 
+## Config errors
+
+A mistake in the eval set is a config error: one line on stderr and exit 2,
+never a traceback and never a failed case.
+
+```
+evals run smoke --eval nope.yaml   # nope.yaml: No such file or directory
+evals run smoke --eval broken.yaml # broken.yaml: eval file must contain 'cases' list
+evals run smoke                    # case 'math': unknown scorer 'regex' (valid scorers: contains, exact, fuzzy)
+```
+
+Scorer names are matched case-insensitively: `exact`, `Exact` and `EXACT` are
+the same scorer. A name that matches nothing is checked before the first
+request, so a typo costs no tokens and leaves no partial run behind. A provider
+that fails mid-run is a different thing: that still exits 1, as above.
+
 ## Eval-set format
 
 `evals.yaml`:
@@ -107,7 +123,9 @@ cases:
 
 Fields: id, input, expected (optional), scorer or scorers (list). Case passes if ALL scorers pass.
 
-Scorers: exact, contains, fuzzy (threshold default 0.6).
+Scorers: exact, contains, fuzzy (threshold default 0.6). Names are
+case-insensitive; anything else is a config error and exits 2 (see
+[Config errors](#config-errors)).
 
 ## Cost
 
